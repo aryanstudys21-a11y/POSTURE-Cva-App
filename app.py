@@ -31,7 +31,7 @@ st.markdown("""
 if "patient_db" not in st.session_state:
     st.session_state.patient_db = []
 
-# --- 2. Vision Pipeline (Auto-Orient & True C7) ---
+# --- 2. Vision Pipeline ---
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(static_image_mode=True, model_complexity=1, min_detection_confidence=0.3)
 
@@ -50,14 +50,16 @@ def auto_orient_image(image_np):
             nose_y = lm[mp_pose.PoseLandmark.NOSE.value].y
             l_sh_y = lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y
             r_sh_y = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y
-            if nose_y < l_sh_y and nose_y < r_sh_y:  
+            
+            # STRICT GRAVITY CHECK: Nose must be definitively higher than shoulders
+            if (l_sh_y - nose_y) > 0.10 and (r_sh_y - nose_y) > 0.10:
                 return test_img, res.pose_landmarks.landmark
     return image_np, None
 
 def analyze_frame(image_np, strictness):
     oriented_img, lm = auto_orient_image(image_np)
     if not lm:
-        return None, "Subject not detected. Ensure head and shoulders are visible."
+        return None, "Subject not detected. Ensure head and shoulders are visibly upright in the frame."
         
     annotated = oriented_img.copy()
     h, w, _ = annotated.shape
@@ -94,8 +96,12 @@ def analyze_frame(image_np, strictness):
         sh_px = (int(l_sh.x * w), int(l_sh.y * h)) if "Left" in side else (int(r_sh.x * w), int(r_sh.y * h))
         
         scale = abs(sh_px[1] - ear_px[1])
-        offset_x = 0.22 if "Left" in side else -0.22 
-        c7_px = (int(sh_px[0] + (scale * offset_x)), int(sh_px[1] - (scale * 0.12)))
+        
+        # TRUE POSTERIOR C7 ESTIMATION
+        # If Left Lateral (facing right), back is on the left (-x). If Right Lateral, back is on the right (+x).
+        offset_x = -0.28 if "Left" in side else 0.28 
+        offset_y = -0.05 # Slightly superior to the acromion
+        c7_px = (int(sh_px[0] + (scale * offset_x)), int(sh_px[1] + (scale * offset_y)))
         
         cva = round(calculate_horizontal_angle(ear_px, c7_px), 2)
         color = (0, 220, 0) if cva >= 50 else (0, 165, 255) if cva >= 45 else (0, 0, 230)
@@ -166,7 +172,7 @@ page = st.sidebar.radio("Navigation", ["📸 Active Scanner", "🗂️ Jamovi Da
 
 if page == "📸 Active Scanner":
     st.markdown("## 🔬 Markerless Postural Kinematics")
-    st.markdown("Automated sagittal/coronal recognition with true C7 coordinate estimation for clinical deployment.")
+    st.markdown("Automated sagittal/coronal recognition with true C7 coordinate estimation.")
     
     patient_id = st.text_input("Subject/Patient ID", "SUBJ-001")
     img_file = st.file_uploader("Upload Patient Scan (PNG/JPG)", type=["png", "jpg", "jpeg"])
@@ -175,7 +181,7 @@ if page == "📸 Active Scanner":
         img_np = np.array(ImageOps.exif_transpose(Image.open(img_file)))
         strictness = st.session_state.get("strictness", 4.0)
         
-        with st.spinner("Executing gravity auto-orientation and plane detection..."):
+        with st.spinner("Executing strict gravity validation and anatomical routing..."):
             res = analyze_frame(img_np, strictness)
             
         if res[0] is not None:
