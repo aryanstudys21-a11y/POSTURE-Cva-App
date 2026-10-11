@@ -14,17 +14,30 @@ st.set_page_config(page_title="KINEMA-AI | Clinical", page_icon="🧬", layout="
 
 st.markdown("""
 <style>
-    :root { --primary: #0F52BA; --background: #F8F9FA; --text: #2B2D42; }
-    .stApp { background-color: #F4F7F6; color: #1E293B; }
-    #MainMenu, footer, header {visibility: hidden;}
+    /* Force High-Contrast Metric Cards */
     div[data-testid="metric-container"] {
-        background-color: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-        border-left: 5px solid #0F52BA;
+        background-color: #1E293B !important;
+        border: 1px solid #334155 !important;
+        padding: 20px !important;
+        border-radius: 12px !important;
+        border-left: 5px solid #3B82F6 !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1) !important;
     }
+    
+    /* Force Metric Label Color (e.g., "Detected Assessment Plane") */
+    div[data-testid="stMetricLabel"] > div {
+        color: #94A3B8 !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Force Metric Value Color (e.g., "0.49°") */
+    div[data-testid="stMetricValue"] > div {
+        color: #F8FAFC !important;
+        font-weight: 800 !important;
+    }
+
+    /* Clean up default Streamlit elements */
+    #MainMenu, footer, header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
