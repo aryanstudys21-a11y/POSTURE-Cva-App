@@ -9,42 +9,25 @@ from fpdf import FPDF
 import tempfile
 import datetime
 
-# --- 1. Clinical UI Overhaul ---
-st.set_page_config(page_title="KINEMA-AI | Clinical", page_icon="🧬", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="KINEMA-AI | Clinical", page_icon="🧬", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
-    /* Force High-Contrast Metric Cards */
     div[data-testid="metric-container"] {
         background-color: #1E293B !important;
         border: 1px solid #334155 !important;
         padding: 20px !important;
         border-radius: 12px !important;
         border-left: 5px solid #3B82F6 !important;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1) !important;
     }
-    
-    /* Force Metric Label Color (e.g., "Detected Assessment Plane") */
-    div[data-testid="stMetricLabel"] > div {
-        color: #94A3B8 !important;
-        font-weight: 600 !important;
-    }
-    
-    /* Force Metric Value Color (e.g., "0.49°") */
-    div[data-testid="stMetricValue"] > div {
-        color: #F8FAFC !important;
-        font-weight: 800 !important;
-    }
-
-    /* Clean up default Streamlit elements */
+    div[data-testid="stMetricLabel"] > div { color: #94A3B8 !important; font-weight: 600 !important; }
+    div[data-testid="stMetricValue"] > div { color: #F8FAFC !important; font-weight: 800 !important; }
     #MainMenu, footer, header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-if "patient_db" not in st.session_state:
-    st.session_state.patient_db = []
+if "patient_db" not in st.session_state: st.session_state.patient_db = []
 
-# --- 2. Vision Pipeline ---
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(static_image_mode=True, model_complexity=1, min_detection_confidence=0.3)
 
@@ -53,163 +36,88 @@ def calculate_horizontal_angle(pt1, pt2):
     dy = pt2[1] - pt1[1] 
     return math.degrees(math.atan2(dy, abs(dx)))
 
-def estimate_c7(sh_px, ear_px, side):
-    scale = abs(sh_px[1] - ear_px[1])
-    offset_x = 0.08 if "Left" in side else -0.08
-    return (int(sh_px[0] + (scale * offset_x)), int(sh_px[1] - (scale * 0.18)))
+def auto_orient_image(image_np):
+    """Multi-pass gravity check: rotates image until the nose is detected above the shoulders."""
+    rotations = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
+    for rot in rotations:
+        test_img = cv2.rotate(image_np, rot) if rot is not None else image_np
+        res = pose.process(cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB))
+        if res.pose_landmarks:
+            lm = res.pose_landmarks.landmark
+            nose_y = lm[mp_pose.PoseLandmark.NOSE.value].y
+            l_sh_y = lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y
+            r_sh_y = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y
+            if nose_y < l_sh_y and nose_y < r_sh_y:  # Y-axis increases downward
+                return test_img, res.pose_landmarks.landmark
+    return image_np, None
 
-def draw_goniometer_arc(annotated, center, angle, side, color):
-    radius = 50
-    start_angle = 180 if "Left" in side else 0
-    end_angle = start_angle - angle if "Left" in side else start_angle - angle
-    baseline_end = (center[0] + (150 if "Right" in side else -150), center[1])
-    cv2.line(annotated, center, baseline_end, (200, 200, 200), 2, cv2.LINE_AA)
-    
-    axes = (radius, radius)
-    start = 0 if "Right" in side else 180
-    end = -angle if "Right" in side else 180 - angle
-    cv2.ellipse(annotated, center, axes, 0, start, end, color, 2, cv2.LINE_AA)
-    
-    text_pos = (center[0] + (60 if "Right" in side else -100), center[1] - 30)
-    cv2.putText(annotated, f"{round(angle, 1)} deg", text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
-
-def analyze_frame(image_np, strictness_threshold):
+def analyze_frame(image_np, strictness):
     h, w, _ = image_np.shape
-    img_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
-    res = pose.process(img_rgb)
-    
-    if not res.pose_landmarks: 
-        return None, "Subject not detected. Please ensure at least one ear and shoulder are clearly visible."
-    
-    lm = res.pose_landmarks.landmark
     annotated = image_np.copy()
+    
+    oriented_img, lm = auto_orient_image(image_np)
+    if not lm:
+        return None, "Subject not detected. Ensure head and shoulders are visible."
+        
+    annotated = oriented_img.copy()
+    h, w, _ = annotated.shape
     
     l_sh = lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
     r_sh = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
-    l_vis = lm[mp_pose.PoseLandmark.LEFT_EAR.value].visibility
-    r_vis = lm[mp_pose.PoseLandmark.RIGHT_EAR.value].visibility
+    l_ear = lm[mp_pose.PoseLandmark.LEFT_EAR.value]
+    r_ear = lm[mp_pose.PoseLandmark.RIGHT_EAR.value]
     
-    if abs(l_sh.x - r_sh.x) > 0.13 and (l_vis > 0.5 and r_vis > 0.5):
-        l_ear_px = (int(lm[mp_pose.PoseLandmark.LEFT_EAR.value].x * w), int(lm[mp_pose.PoseLandmark.LEFT_EAR.value].y * h))
-        r_ear_px = (int(lm[mp_pose.PoseLandmark.RIGHT_EAR.value].x * w), int(lm[mp_pose.PoseLandmark.RIGHT_EAR.value].y * h))
-        l_sh_px = (int(l_sh.x * w), int(l_sh.y * h))
-        r_sh_px = (int(r_sh.x * w), int(r_sh.y * h))
+    # Strict Plane Routing: Shoulders must be horizontally wide apart AND both ears highly visible
+    is_coronal = abs(l_sh.x - r_sh.x) > 0.15 and (l_ear.visibility > 0.6 and r_ear.visibility > 0.6)
+    
+    if is_coronal:
+        l_ear_px, r_ear_px = (int(l_ear.x * w), int(l_ear.y * h)), (int(r_ear.x * w), int(r_ear.y * h))
+        l_sh_px, r_sh_px = (int(l_sh.x * w), int(l_sh.y * h)), (int(r_sh.x * w), int(r_sh.y * h))
         
         head_tilt = round(abs(calculate_horizontal_angle(l_ear_px, r_ear_px)), 2)
-        sh_tilt = round(abs(calculate_horizontal_angle(l_sh_px, r_sh_px)), 2)
-        
         cv2.line(annotated, l_ear_px, r_ear_px, (255, 150, 0), 4, cv2.LINE_AA)
         cv2.line(annotated, l_sh_px, r_sh_px, (0, 200, 255), 4, cv2.LINE_AA)
         
-        status = "Clinically Symmetrical" if (head_tilt < strictness_threshold and sh_tilt < strictness_threshold) else "Asymmetry Detected"
+        status = "Clinically Symmetrical" if head_tilt < strictness else "Asymmetry Detected"
         return annotated, {"Plane": "Coronal (Frontal)", "Primary_Metric": "Head Tilt", "Primary_Value": head_tilt, "Status": status}
     
     else:
-        side = "Left Lateral" if l_vis > r_vis else "Right Lateral"
-        ear_raw = lm[mp_pose.PoseLandmark.LEFT_EAR.value] if "Left" in side else lm[mp_pose.PoseLandmark.RIGHT_EAR.value]
-        sh_raw = lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value] if "Left" in side else lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
+        side = "Left Lateral" if l_ear.visibility > r_ear.visibility else "Right Lateral"
+        ear_px = (int(l_ear.x * w), int(l_ear.y * h)) if "Left" in side else (int(r_ear.x * w), int(r_ear.y * h))
+        sh_px = (int(l_sh.x * w), int(l_sh.y * h)) if "Left" in side else (int(r_sh.x * w), int(r_sh.y * h))
         
-        ear_px = (int(ear_raw.x * w), int(ear_raw.y * h))
-        sh_px = (int(sh_raw.x * w), int(sh_raw.y * h))
-        c7_px = estimate_c7(sh_px, ear_px, side)
+        scale = abs(sh_px[1] - ear_px[1])
+        offset_x = 0.08 if "Left" in side else -0.08
+        c7_px = (int(sh_px[0] + (scale * offset_x)), int(sh_px[1] - (scale * 0.18)))
         
         cva = round(calculate_horizontal_angle(ear_px, c7_px), 2)
-        
         color = (186, 82, 15) if cva >= 50 else (50, 50, 220)
+        
         cv2.line(annotated, c7_px, ear_px, color, 4, cv2.LINE_AA)
-        draw_goniometer_arc(annotated, c7_px, cva, side, color)
+        cv2.line(annotated, c7_px, (c7_px[0] + (150 if "Right" in side else -150), c7_px[1]), (200, 200, 200), 2, cv2.LINE_AA)
         
-        cv2.circle(annotated, ear_px, 6, (255, 255, 255), -1)
-        cv2.circle(annotated, c7_px, 6, (255, 255, 255), -1)
-        
-        if cva >= 50: status = "Optimal Alignment"
-        elif cva >= 45: status = "Mild Forward Head Posture"
-        elif cva >= 40: status = "Moderate FHP"
-        else: status = "Severe FHP"
-            
-        return annotated, {"Plane": f"Sagittal ({side})", "Primary_Metric": "Craniovertebral Angle", "Primary_Value": cva, "Status": status}
+        status = "Optimal Alignment" if cva >= 50 else "Severe FHP" if cva < 40 else "FHP"
+        return annotated, {"Plane": f"Sagittal ({side})", "Primary_Metric": "CVA", "Primary_Value": cva, "Status": status}
 
-def generate_pdf(patient_id, metrics, image_path):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, "KINEMA-AI: Clinical Biomechanics Report", ln=True, align="C")
-    pdf.set_font("Helvetica", size=10)
-    pdf.cell(0, 8, f"Date: {datetime.date.today()} | Patient ID: {patient_id}", ln=True, align="C")
-    pdf.ln(5)
-    pdf.image(image_path, x=35, y=35, w=140)
-    pdf.set_y(185)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, "Kinematic Assessments:", ln=True)
-    pdf.set_font("Helvetica", size=10)
-    for k, v in metrics.items():
-        pdf.cell(0, 6, f"- {k}: {v}", ln=True)
-    return pdf.output()
-
-# --- 3. Interactive Multi-Page UI ---
-st.sidebar.markdown("### 🧬 KINEMA-AI Clinical")
-page = st.sidebar.radio("Navigation", ["📸 Active Scanner", "🗂️ Jamovi Data Engine", "⚙️ Clinical Settings"])
+st.sidebar.markdown("### 🧬 KINEMA-AI")
+page = st.sidebar.radio("Navigation", ["📸 Active Scanner", "⚙️ Settings"])
 
 if page == "📸 Active Scanner":
-    st.markdown("## Active Kinematic Scanner")
-    
-    patient_id = st.text_input("Subject/Patient ID", "SUBJ-001")
-    img_file = st.file_uploader("Upload Patient Scan (PNG/JPG)", type=["png", "jpg", "jpeg"])
-        
+    img_file = st.file_uploader("Upload Scan", type=["png", "jpg", "jpeg"])
     if img_file:
-        # THE FIX: Manual Rotation Override Tools
-        st.markdown("#### 🔄 Image Orientation Check")
-        rotation = st.radio("If the image uploaded sideways, fix it here before processing:", 
-                            ["Looks Good (No Change)", "Rotate 90° Right", "Rotate 90° Left", "Rotate 180°"], 
-                            horizontal=True)
-        
-        img_pil = ImageOps.exif_transpose(Image.open(img_file))
-        
-        if rotation == "Rotate 90° Right": img_pil = img_pil.rotate(-90, expand=True)
-        elif rotation == "Rotate 90° Left": img_pil = img_pil.rotate(90, expand=True)
-        elif rotation == "Rotate 180°": img_pil = img_pil.rotate(180, expand=True)
-            
-        img_np = np.array(img_pil)
+        img_np = np.array(ImageOps.exif_transpose(Image.open(img_file)))
         strictness = st.session_state.get("strictness", 4.0)
         
-        with st.spinner("Calculating biomechanical vectors..."):
+        with st.spinner("Executing gravity auto-orientation and plane detection..."):
             res = analyze_frame(img_np, strictness)
             
         if res[0] is not None:
-            frame, metrics = res
             col1, col2 = st.columns([1.5, 1])
-            with col1:
-                st.image(frame, channels="RGB", use_container_width=True)
-            with col2:
-                st.metric("Detected Plane", metrics["Plane"])
-                st.metric(metrics["Primary_Metric"], f"{metrics['Primary_Value']}°")
-                st.metric("Diagnostic Status", metrics["Status"])
-                
-                st.markdown("---")
-                # Automated PDF Engine
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    Image.fromarray(frame).save(tmp.name)
-                    pdf_bytes = generate_pdf(patient_id, metrics, tmp.name)
-                    
-                st.download_button("📄 Export Clinical PDF", data=bytes(pdf_bytes), file_name=f"{patient_id}_Report.pdf", mime="application/pdf", use_container_width=True)
-                
-                if st.button("💾 Save to Jamovi Records", use_container_width=True):
-                    record = {"Subject_ID": patient_id, "Plane": metrics["Plane"], "Angle_Deg": metrics["Primary_Value"], "Classification": metrics["Status"]}
-                    st.session_state.patient_db.append(record)
-                    st.success("Saved to Data Engine.")
+            col1.image(res[0], channels="RGB", use_container_width=True)
+            col2.metric("Detected Plane", res[1]["Plane"])
+            col2.metric(res[1]["Primary_Metric"], f"{res[1]['Primary_Value']}°")
+            col2.metric("Diagnostic Status", res[1]["Status"])
         else:
             st.error(res[1])
-
-elif page == "🗂️ Jamovi Data Engine":
-    st.markdown("## Statistical Export Engine")
-    st.markdown("Records formatted for descriptive statistics and non-parametric testing.")
-    if len(st.session_state.patient_db) > 0:
-        df = pd.DataFrame(st.session_state.patient_db)
-        st.dataframe(df, use_container_width=True)
-        st.download_button("📥 Download .CSV for Jamovi/SPSS", data=df.to_csv(index=False).encode('utf-8'), file_name="Jamovi_Kinematic_Data.csv", mime="text/csv")
-    else:
-        st.info("No clinical scans saved.")
-
-elif page == "⚙️ Clinical Settings":
-    st.markdown("## Engine Tuning")
-    st.session_state.strictness = st.slider("Coronal Symmetry Tolerance (°)", 1.0, 10.0, 4.0, 0.5)
+elif page == "⚙️ Settings":
+    st.session_state.strictness = st.slider("Coronal Tolerance (°)", 1.0, 10.0, 4.0, 0.5)
