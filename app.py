@@ -17,7 +17,7 @@ st.set_page_config(
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(
     static_image_mode=True,
-    model_complexity=2,               # High accuracy for clothing occlusion
+    model_complexity=1,               # High accuracy for clothing occlusion
     enable_segmentation=False,
     min_detection_confidence=0.65
 )
